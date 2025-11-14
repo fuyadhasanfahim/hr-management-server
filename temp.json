@@ -1,0 +1,11 @@
+{
+    "fullName": "MD Golam Sarwar",
+    "email": "od866812@gmail.com",
+    "eid": "WB000027",
+    "casualLeave": {
+        "$numberInt": "10"
+    },
+    "sickLeave": {
+        "$numberInt": "0"
+    }
+}
