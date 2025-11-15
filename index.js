@@ -3515,7 +3515,7 @@ async function run() {
                 const match = {};
                 if (clientId) match.clientID = String(clientId).trim();
 
-                // ✅ optional month filter (only works if 'month' exists or convertable date)
+                // Optional month filter
                 if (month) {
                     const wanted = String(month).trim().toLowerCase();
                     match.$expr = {
@@ -3532,7 +3532,7 @@ async function run() {
                                                             $toDate:
                                                                 '$orderDate',
                                                         },
-                                                        { $toDate: '$date' }, // fallback for your string date field
+                                                        { $toDate: '$date' },
                                                     ],
                                                 },
                                                 format: '%B',
@@ -3564,50 +3564,43 @@ async function run() {
                             $or: [
                                 { clientID: searchRegex },
                                 { orderName: searchRegex },
-                                { orderStatus: searchRegex }, // ✅ correct field
+                                { orderStatus: searchRegex },
                             ],
                         },
                     });
                 }
 
+                // 🔥 Convert date BEFORE sort
                 pipeline.push(
-                    { $sort: { lastUpdated: -1, _id: -1 } },
+                    {
+                        $addFields: {
+                            parsedDate: {
+                                $dateFromString: {
+                                    dateString: '$date',
+                                    format: '%d-%b-%Y %H:%M:%S',
+                                    onError: null,
+                                    onNull: null,
+                                },
+                            },
+                            parsedDeadline: {
+                                $dateFromString: {
+                                    dateString: '$orderDeadLine',
+                                    format: '%d-%b-%Y %H:%M:%S',
+                                    onError: null,
+                                    onNull: null,
+                                },
+                            },
+                        },
+                    },
+                    // 🔥 Sort by parsedDate (DESC)
+                    { $sort: { parsedDate: -1, _id: -1 } },
                     {
                         $facet: {
                             items: [
                                 { $skip: (pageNum - 1) * pageSize },
                                 { $limit: pageSize },
-                                {
-                                    $addFields: {
-                                        date: {
-                                            $cond: [
-                                                {
-                                                    $eq: [
-                                                        { $type: '$date' },
-                                                        'string',
-                                                    ],
-                                                },
-                                                { $toDate: '$date' },
-                                                '$date',
-                                            ],
-                                        },
-                                        orderDeadLine: {
-                                            $cond: [
-                                                {
-                                                    $eq: [
-                                                        {
-                                                            $type: '$orderDeadLine',
-                                                        },
-                                                        'string',
-                                                    ],
-                                                },
-                                                { $toDate: '$orderDeadLine' },
-                                                '$orderDeadLine',
-                                            ],
-                                        },
-                                    },
-                                },
 
+                                // Final cleaned fields
                                 {
                                     $project: {
                                         _id: 1,
@@ -3616,10 +3609,10 @@ async function run() {
                                         orderStatus: 1,
                                         orderQTY: 1,
                                         orderPrice: 1,
-                                        date: 1,
                                         needServices: 1,
                                         returnFormat: 1,
-                                        orderDeadLine: 1,
+                                        date: '$parsedDate',
+                                        orderDeadLine: '$parsedDeadline',
                                     },
                                 },
                             ],
