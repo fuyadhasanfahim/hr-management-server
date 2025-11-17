@@ -1227,7 +1227,6 @@ async function run() {
         //************************************************************************************************
         app.post('/employee/checkIn', async (req, res) => {
             const checkInInfo = req.body;
-            console.log('📥 Incoming check-in:', checkInInfo);
 
             try {
                 // prevent duplicate check-in
@@ -1296,11 +1295,6 @@ async function run() {
                     shiftStartTs + Number(shiftInfo.lateAfterMinutes) * 60000;
                 const absentLimit =
                     shiftStartTs + Number(shiftInfo.absentAfterMinutes) * 60000;
-
-                console.log('⏱ Now:', now.format());
-                console.log('⏱ Shift Start:', shiftStart.format());
-                console.log('⏱ Late Limit:', moment(lateLimit).format());
-                console.log('⏱ Absent Limit:', moment(absentLimit).format());
 
                 // ------------------------------------
                 // ✅ ON TIME

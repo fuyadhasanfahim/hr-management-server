@@ -3,6 +3,7 @@ const { loanRouter } = require('./loan.js');
 const { employeeRoute } = require('./employee.js');
 const { expenseRoute } = require('./expanse.js');
 const { shiftRoute } = require('./shift.js');
+const { salaryRoute } = require('./salary.js');
 
 const router = express.Router();
 
@@ -22,6 +23,10 @@ const moduleRoutes = [
     {
         path: '/shifts',
         route: shiftRoute,
+    },
+    {
+        path: '/salary',
+        route: salaryRoute,
     },
 ];
 

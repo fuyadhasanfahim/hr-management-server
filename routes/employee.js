@@ -8,6 +8,7 @@ const employeeRoute = express.Router();
 const database = client.db('hrManagement');
 const employeeCollections = database.collection('employeeList');
 const userCollections = database.collection('userList');
+const PFAndSalaryCollections = database.collection('PFAndSalaryList');
 
 const mailTransporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
@@ -65,7 +66,6 @@ employeeRoute.post('/add-employee', async (req, res) => {
         const employeeDoc = {
             email: normalizedEmail,
             eid,
-            salary,
             role,
             branch,
             status: 'pending',
@@ -73,6 +73,13 @@ employeeRoute.post('/add-employee', async (req, res) => {
             updatedAt: new Date(),
             activationToken,
         };
+
+        await PFAndSalaryCollections.insertOne({
+            email: normalizedEmail,
+            salary,
+            pfContribution: 0,
+            pfStatus: 'de-active',
+        });
 
         const username =
             typeof normalizedEmail === 'string' && normalizedEmail.includes('@')
