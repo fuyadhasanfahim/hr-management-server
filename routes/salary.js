@@ -9,106 +9,225 @@ const PFAndSalaryCollections = database.collection('PFAndSalaryList');
 const attendanceCollections = database.collection('attendanceList');
 const employeeCollections = database.collection('employeeList');
 
+const MONTHS = [
+    'january','february','march','april','may','june',
+    'july','august','september','october','november','december'
+];
+
+function countSundays(year, monthIndex) {
+    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    let sundays = 0;
+    for (let day = 1; day <= daysInMonth; day++) {
+        if (new Date(year, monthIndex, day).getDay() === 0) sundays++;
+    }
+    return sundays;
+}
+
 salaryRoute.get('/get-salary-sheet', async (req, res) => {
     try {
         let { search = '', month = '', page = 1, limit = 20 } = req.query;
 
-        page = Number(page);
-        limit = Number(limit);
-
-        const skip = (page - 1) * limit;
-
-        // Search by email OR name
-        const searchFilter = search
-            ? {
-                  $or: [
-                      { email: { $regex: search, $options: 'i' } },
-                      { name: { $regex: search, $options: 'i' } },
-                  ],
-              }
-            : {};
-
-        const monthFilter = month ? { month } : {};
-
-        // Fetch salary records
-        const employees = await PFAndSalaryCollections.find(searchFilter)
-            .skip(skip)
-            .limit(limit)
-            .toArray();
-
-        const totalEmployees = await PFAndSalaryCollections.countDocuments(
-            searchFilter
-        );
-
-        const results = [];
-
-        for (let emp of employees) {
-            const empEmail = emp.email;
-
-            // Fetch employee details (NAME)
-            const employeeData = await employeeCollections.findOne({
-                email: empEmail,
-            });
-
-            const employeeName = employeeData?.fullName || 'Unknown';
-
-            // Attendance for selected month
-            const attendance = await attendanceCollections
-                .find({ email: empEmail, ...monthFilter })
-                .toArray();
-
-            const presentCount = attendance.length;
-
-            // Number of days in selected month
-            let totalDaysInMonth = 30;
-
-            if (month) {
-                const monthIndex = [
-                    'January',
-                    'February',
-                    'March',
-                    'April',
-                    'May',
-                    'June',
-                    'July',
-                    'August',
-                    'September',
-                    'October',
-                    'November',
-                    'December',
-                ].indexOf(month);
-
-                const year = new Date().getFullYear();
-                totalDaysInMonth = new Date(year, monthIndex + 1, 0).getDate();
-            }
-
-            const absentCount = totalDaysInMonth - presentCount;
-
-            const monthlySalary = emp.salary || 0;
-            const perDaySalary = monthlySalary / totalDaysInMonth;
-            const totalPayable = perDaySalary * presentCount;
-
-            results.push({
-                name: employeeName,
-                email: empEmail,
-                salary: monthlySalary,
-                perDaySalary,
-                presentCount,
-                absentCount,
-                totalPayable,
+        // Month is required
+        if (!month) {
+            return res.json({
+                page: 1,
+                limit: Number(limit),
+                totalEmployees: 0,
+                totalPages: 0,
+                data: [],
+                message: 'Please select a month to view salary sheet.',
             });
         }
 
-        res.json({
+        // Normalize month name
+        const monthNormalized = String(month).trim().toLowerCase();
+        const monthIndex = MONTHS.indexOf(monthNormalized);
+
+        if (monthIndex === -1) {
+            return res.status(400).json({
+                message: 'Invalid month. Expected full month name like "October".',
+                received: month,
+            });
+        }
+
+        page = Number(page);
+        limit = Number(limit);
+        const skip = (page - 1) * limit;
+
+        const year = new Date().getFullYear();
+        const totalDaysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+        const sundays = countSundays(year, monthIndex);
+
+        // Present days will be: real-attendance + Sundays
+        const attendanceMonthLower = monthNormalized;
+
+        const pfMatch = {};
+        if (search) {
+            pfMatch.email = { $regex: search, $options: 'i' };
+        }
+
+        // BUILD PIPELINE
+        const pipeline = [
+            { $match: pfMatch },
+
+            // Join employee
+            {
+                $lookup: {
+                    from: 'employeeList',
+                    localField: 'email',
+                    foreignField: 'email',
+                    as: 'emp',
+                },
+            },
+            { $unwind: '$emp' },
+
+            // Exclude deactivated
+            { $match: { 'emp.status': { $ne: 'De-activate' } } },
+        ];
+
+        // Add name search also
+        if (search) {
+            pipeline.push({
+                $match: {
+                    $or: [
+                        { email: { $regex: search, $options: 'i' } },
+                        { 'emp.fullName': { $regex: search, $options: 'i' } },
+                    ],
+                },
+            });
+        }
+
+        // Lookup attendance count for selected month
+        pipeline.push(
+            {
+                $lookup: {
+                    from: 'attendanceList',
+                    let: { empEmail: '$email' },
+                    pipeline: [
+                        {
+                            $match: {
+                                $expr: {
+                                    $and: [
+                                        { $eq: ['$email', '$$empEmail'] },
+                                        {
+                                            $eq: [
+                                                { $toLower: '$month' },
+                                                attendanceMonthLower,
+                                            ],
+                                        },
+                                    ],
+                                },
+                            },
+                        },
+                        { $count: 'presentCount' },
+                    ],
+                    as: 'attendance',
+                },
+            },
+
+            // Add salary calculations
+            {
+                $addFields: {
+                    rawPresent: {
+                        $ifNull: [{ $arrayElemAt: ['$attendance.presentCount', 0] }, 0],
+                    },
+                },
+            },
+            {
+                $addFields: {
+                    // present = real present days + Sundays
+                    presentCount: {
+                        $add: [
+                            '$rawPresent',
+                            sundays
+                        ]
+                    },
+
+                    // absent = totalDays - present
+                    absentCount: {
+                        $subtract: [totalDaysInMonth, { $add: ['$rawPresent', sundays] }]
+                    },
+
+                    perDaySalary: {
+                        $round: [
+                            { $divide: ['$salary', totalDaysInMonth] },
+                            2
+                        ]
+                    },
+
+                    totalPayable: {
+                        $round: [
+                            {
+                                $multiply: [
+                                    { $divide: ['$salary', totalDaysInMonth] },
+                                    { $add: ['$rawPresent', sundays] }
+                                ]
+                            },
+                            2
+                        ]
+                    },
+
+                    name: '$emp.fullName'
+                }
+            },
+
+            // Cleanup
+            {
+                $project: {
+                    emp: 0,
+                    attendance: 0,
+                    rawPresent: 0
+                }
+            },
+
+            { $skip: skip },
+            { $limit: limit }
+        );
+
+        const data = await PFAndSalaryCollections.aggregate(pipeline).toArray();
+
+        // COUNT PIPELINE
+        const countPipeline = [
+            { $match: pfMatch },
+            {
+                $lookup: {
+                    from: 'employeeList',
+                    localField: 'email',
+                    foreignField: 'email',
+                    as: 'emp',
+                },
+            },
+            { $unwind: '$emp' },
+            { $match: { 'emp.status': { $ne: 'De-activate' } } },
+        ];
+
+        if (search) {
+            countPipeline.push({
+                $match: {
+                    $or: [
+                        { email: { $regex: search, $options: 'i' } },
+                        { 'emp.fullName': { $regex: search, $options: 'i' } },
+                    ],
+                },
+            });
+        }
+
+        countPipeline.push({ $count: 'total' });
+
+        const countResult = await PFAndSalaryCollections.aggregate(countPipeline).toArray();
+        const totalEmployees = countResult[0]?.total || 0;
+
+        return res.json({
             page,
             limit,
             totalEmployees,
             totalPages: Math.ceil(totalEmployees / limit),
-            data: results,
+            data,
         });
+
     } catch (error) {
-        console.log(error);
-        res.status(500).json({ message: 'Internal Server Error' });
+        console.error('Salary sheet error:', error);
+        return res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
