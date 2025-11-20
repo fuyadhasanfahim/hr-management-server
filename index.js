@@ -1266,6 +1266,44 @@ async function run() {
                     });
                 }
 
+                // -----------------------------
+                // ⭐ WEEKEND VALIDATION
+                // -----------------------------
+                const workingShift = await workingShiftCollections.findOne({
+                    shiftName: shiftInfo.shiftName,
+                    branch: shiftInfo.branch,
+                });
+
+                if (workingShift?.weekends?.length > 0) {
+                    const todayName = moment().tz('Asia/Dhaka').format('dddd');
+
+                    if (workingShift.weekends.includes(todayName)) {
+                        return res.json({
+                            message: `Today is marked as weekend (${todayName}). Check-in not allowed.`,
+                        });
+                    }
+                }
+
+                // -----------------------------
+                // ⭐ LEAVE VALIDATION
+                // -----------------------------
+                const today = checkInInfo.date; // format: YYYY-MM-DD
+
+                const approvedLeave =
+                    await leaveApplicationsCollections.findOne({
+                        email: checkInInfo.email,
+                        status: 'Approved',
+                        startDate: { $lte: today },
+                        endDate: { $gte: today },
+                    });
+
+                if (approvedLeave) {
+                    return res.json({
+                        message:
+                            'You are on approved leave today. Check-in blocked.',
+                    });
+                }
+
                 // ------------------------------------
                 // 🔥 TIME CALCULATIONS (100% FIXED)
                 // ------------------------------------
@@ -1320,8 +1358,6 @@ async function run() {
 
                 // ------------------------------------
                 // 🔴 ABSENT (BUT ALLOWED TO CHECK-IN)
-                // Example: absentAfterMinutes = 120
-                // Means: 17:00 → 18:00 (absent range)
                 // ------------------------------------
                 if (nowTs > lateLimit && nowTs <= absentLimit) {
                     await checkInCollections.insertOne({
@@ -1655,17 +1691,42 @@ async function run() {
             try {
                 const leaveData = req.body;
                 const { email, totalDays } = leaveData;
-                // check if the user has remaining leave balance
-                const leaveBalance = await leaveBalanceCollections.findOne({
+
+                let leaveBalance = await leaveBalanceCollections.findOne({
                     email,
                 });
+
+                if (!leaveBalance) {
+                    const employeeInfo = await employeeCollections.findOne({
+                        email,
+                    });
+
+                    if (!employeeInfo) {
+                        return res.json({
+                            message: 'Employee record not found',
+                        });
+                    }
+
+                    const newLeaveBalance = {
+                        fullName: employeeInfo.fullName,
+                        email: employeeInfo.email,
+                        eid: employeeInfo.eid,
+                        casualLeave: 12,
+                        sickLeave: 6,
+                        createdAt: new Date(),
+                    };
+
+                    await leaveBalanceCollections.insertOne(newLeaveBalance);
+
+                    leaveBalance = newLeaveBalance;
+                }
+
                 if (leaveBalance.casualLeave < totalDays) {
                     return res.json({
                         message: 'You have no remaining leave balance',
                     });
                 }
 
-                // Check if the user already has a pending leave request
                 const existingLeave = await appliedLeaveCollections.findOne({
                     email,
                     status: 'Pending',
@@ -1677,17 +1738,17 @@ async function run() {
                     });
                 }
 
-                // Insert the new leave request
                 const result = await appliedLeaveCollections.insertOne(
                     leaveData
                 );
+
                 await adminNotificationCollections.insertOne({
                     notification: `New leave request received`,
-                    email: email,
+                    email,
                     link: '/appliedLeave',
                 });
 
-                if (result.insertedId) {
+                if (result) {
                     res.json({ message: 'success' });
                 } else {
                     res.json({ message: 'Failed to submit leave request' });
@@ -1699,6 +1760,7 @@ async function run() {
                 });
             }
         });
+
         // ************************************************************************************************
         // ************************************************************************************************
 
@@ -2582,6 +2644,214 @@ async function run() {
                 res.json({ message: 'Failed to mark notification as read' });
             }
         });
+        // --------- PUT /grantLeave/:id  (grant full or partial leave) -------------
+        app.put('/grantLeave/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                if (!ObjectId.isValid(id)) {
+                    return res
+                        .status(400)
+                        .json({ message: 'Invalid leave ID' });
+                }
+
+                // expected body: { grantedDates: ["21-Nov-2025", ...], declinedDates: [...], grantedBy: "<adminEmail>" }
+                const {
+                    grantedDates = [],
+                    declinedDates = [],
+                    grantedBy,
+                } = req.body || {};
+
+                const leaveDoc = await appliedLeaveCollections.findOne({
+                    _id: new ObjectId(id),
+                });
+                if (!leaveDoc)
+                    return res
+                        .status(404)
+                        .json({ message: 'Leave application not found' });
+
+                // compute number of days to grant
+                const daysToGrant = Array.isArray(grantedDates)
+                    ? grantedDates.length
+                    : 0;
+
+                // reduce leave balance by daysToGrant (safe-guard: only if > 0)
+                if (daysToGrant > 0) {
+                    await leaveBalanceCollections.updateOne(
+                        { email: leaveDoc.email },
+                        { $inc: { casualLeave: -daysToGrant } },
+                        { upsert: false }
+                    );
+                }
+
+                // Build update object for appliedLeave doc
+                const update = {
+                    $set: {
+                        status: 'Approved',
+                        grantedDates: grantedDates,
+                        declinedDates: declinedDates,
+                        updatedAt: new Date(),
+                        grantedBy: grantedBy || 'system',
+                    },
+                };
+
+                const result = await appliedLeaveCollections.updateOne(
+                    { _id: new ObjectId(id) },
+                    update
+                );
+
+                // Insert notification for employee
+                await employeeNotificationCollections.insertOne({
+                    notification: `Your leave request has been approved (${daysToGrant} day(s) granted).`,
+                    email: leaveDoc.email,
+                    link: '/leave',
+                    isRead: false,
+                    createdAt: new Date(),
+                });
+
+                // Update employee status to On Leave (optional)
+                await employeeCollections.updateOne(
+                    { email: leaveDoc.email },
+                    { $set: { status: 'On Leave' } }
+                );
+
+                // Insert attendance entries for each granted date to block check-in
+                // Note: For attendance schema we use the fields you used elsewhere: { email, fullName, date, status, createdAt }
+                for (const d of grantedDates || []) {
+                    // Avoid duplicates: only insert if an attendance doc for that email & date doesn't exist
+                    const exists = await attendanceCollections.findOne({
+                        email: leaveDoc.email,
+                        date: d,
+                    });
+                    if (!exists) {
+                        await attendanceCollections.insertOne({
+                            email: leaveDoc.email,
+                            fullName:
+                                leaveDoc.employeeName ||
+                                leaveDoc.fullName ||
+                                '',
+                            date: d,
+                            status: 'Leave-Granted',
+                            meta: { source: 'leave-grant', leaveId: id },
+                            createdAt: new Date(),
+                        });
+                    }
+                }
+
+                res.json({
+                    message: 'Leave granted',
+                    modifiedCount: result.modifiedCount,
+                });
+            } catch (err) {
+                console.error('grantLeave error:', err);
+                res.status(500).json({
+                    message: 'Failed to grant leave',
+                    error: err.message,
+                });
+            }
+        });
+
+        // --------- PUT /revokeGrant/:id  (cancel previously granted leave) -------------
+        app.put('/revokeGrant/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                if (!ObjectId.isValid(id)) {
+                    return res
+                        .status(400)
+                        .json({ message: 'Invalid leave ID' });
+                }
+
+                // expected body: { revokedDates: ["21-Nov-2025", ...], revokedBy: "<adminEmail>", setStatusTo: 'Pending'|'Cancelled' }
+                const {
+                    revokedDates = [],
+                    revokedBy,
+                    setStatusTo = 'Cancelled',
+                } = req.body || {};
+
+                const leaveDoc = await appliedLeaveCollections.findOne({
+                    _id: new ObjectId(id),
+                });
+                if (!leaveDoc)
+                    return res
+                        .status(404)
+                        .json({ message: 'Leave application not found' });
+
+                // 1) Restore leave balance by number of revokedDates
+                const restoreDays = Array.isArray(revokedDates)
+                    ? revokedDates.length
+                    : 0;
+                if (restoreDays > 0) {
+                    await leaveBalanceCollections.updateOne(
+                        { email: leaveDoc.email },
+                        { $inc: { casualLeave: restoreDays } }
+                    );
+                }
+
+                // 2) Remove attendance entries we added earlier (meta.source === 'leave-grant' and leaveId)
+                if (revokedDates.length > 0) {
+                    await attendanceCollections.deleteMany({
+                        email: leaveDoc.email,
+                        date: { $in: revokedDates },
+                        'meta.source': 'leave-grant',
+                        'meta.leaveId': id,
+                    });
+                }
+
+                // 3) Update appliedLeave doc: remove grantedDates that were revoked
+                // compute new grantedDates array if any
+                const existingGranted = Array.isArray(leaveDoc.grantedDates)
+                    ? leaveDoc.grantedDates
+                    : [];
+                const newGranted = existingGranted.filter(
+                    (d) => !revokedDates.includes(d)
+                );
+
+                const updateObj = {
+                    $set: {
+                        grantedDates: newGranted,
+                        updatedAt: new Date(),
+                        grantedBy: revokedBy || leaveDoc.grantedBy || 'system',
+                    },
+                };
+
+                // If no granted dates remain, set status according to setStatusTo
+                if (!newGranted.length) updateObj.$set.status = setStatusTo;
+
+                const result = await appliedLeaveCollections.updateOne(
+                    { _id: new ObjectId(id) },
+                    updateObj
+                );
+
+                // notify employee
+                await employeeNotificationCollections.insertOne({
+                    notification: `Your leave grant has been cancelled for ${restoreDays} day(s).`,
+                    email: leaveDoc.email,
+                    link: '/leave',
+                    isRead: false,
+                    createdAt: new Date(),
+                });
+
+                // If no granted dates remain, optionally set employee status back to 'Active'
+                if (!newGranted.length) {
+                    await employeeCollections.updateOne(
+                        { email: leaveDoc.email },
+                        { $set: { status: 'Active' } }
+                    );
+                }
+
+                res.json({
+                    message: 'Grant revoked',
+                    modifiedCount: result.modifiedCount,
+                    remainingGranted: newGranted,
+                });
+            } catch (err) {
+                console.error('revokeGrant error:', err);
+                res.status(500).json({
+                    message: 'Failed to revoke grant',
+                    error: err.message,
+                });
+            }
+        });
+
         // *****************************************************************************************
         // PUT /declineLeave/:id
         app.put('/declineLeave/:id', async (req, res) => {

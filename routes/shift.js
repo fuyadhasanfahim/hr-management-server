@@ -7,7 +7,11 @@ const database = client.db('hrManagement');
 
 const shiftCollection = database.collection('workingShiftList');
 const userCollections = database.collection('userList');
+const shiftingCollections = database.collection('shiftingList'); // moved up
 
+// =======================================================
+// UPDATE SHIFT (NOW INCLUDES WEEKENDS)
+// =======================================================
 router.put('/update-shift', async (req, res) => {
     try {
         const data = req.body;
@@ -22,6 +26,7 @@ router.put('/update-shift', async (req, res) => {
             lateAfterMinutes,
             absentAfterMinutes,
             allowOT,
+            weekends, // NEW FIELD
         } = data;
 
         if (!_id) {
@@ -39,6 +44,7 @@ router.put('/update-shift', async (req, res) => {
             });
         }
 
+        // AUTH
         const userDoc = await userCollections.findOne(
             { email: userEmail },
             { projection: { role: 1 } }
@@ -53,6 +59,7 @@ router.put('/update-shift', async (req, res) => {
             });
         }
 
+        // BUILD UPDATE BODY
         const updateBody = {
             shiftName,
             branch,
@@ -61,11 +68,12 @@ router.put('/update-shift', async (req, res) => {
             lateAfterMinutes: Number(lateAfterMinutes) || 5,
             absentAfterMinutes: Number(absentAfterMinutes) || 60,
             allowOT,
+            weekends: weekends || [],
         };
 
-        // Update workingShiftList
+        // UPDATE SHIFT DOCUMENT
         const result = await shiftCollection.findOneAndUpdate(
-            { _id: new ObjectId(_id) },
+            { _id: new ObjectId(String(_id)) },
             { $set: updateBody },
             { returnDocument: 'after' }
         );
@@ -77,13 +85,11 @@ router.put('/update-shift', async (req, res) => {
             });
         }
 
-        // ------------------------------------------
-        // 🔥 AUTO UPDATE ALL ASSIGNED EMPLOYEES
-        // ------------------------------------------
-        const shiftingCollections = database.collection('shiftingList');
-
+        // ======================================================
+        // AUTO UPDATE ALL ASSIGNED EMPLOYEES WITH NEW WEEKENDS
+        // ======================================================
         const assignUpdate = await shiftingCollections.updateMany(
-            { shiftName: shiftName, branch: branch },
+            { shiftName, branch },
             {
                 $set: {
                     startTime,
@@ -91,11 +97,10 @@ router.put('/update-shift', async (req, res) => {
                     lateAfterMinutes: Number(lateAfterMinutes) || 5,
                     absentAfterMinutes: Number(absentAfterMinutes) || 60,
                     allowOT,
+                    weekends: weekends || [], // APPLY TO ALL ASSIGNED EMPLOYEES
                 },
             }
         );
-
-        console.log('Updated assigned employees:', assignUpdate.modifiedCount);
 
         return res.status(200).json({
             success: true,
@@ -112,6 +117,9 @@ router.put('/update-shift', async (req, res) => {
     }
 });
 
+// =======================================================
+// DELETE SHIFT
+// =======================================================
 router.delete('/delete-shift/:id', async (req, res) => {
     try {
         const shiftId = req.params.id;
@@ -162,6 +170,9 @@ router.delete('/delete-shift/:id', async (req, res) => {
     }
 });
 
+// =======================================================
+// CREATE SHIFT (NOW SAVES WEEKENDS)
+// =======================================================
 router.post('/new-shift', async (req, res) => {
     try {
         const {
@@ -172,6 +183,7 @@ router.post('/new-shift', async (req, res) => {
             lateAfterMinutes,
             absentAfterMinutes,
             allowOT,
+            weekends, // NEW FIELD
             userEmail,
         } = req.body;
 
@@ -213,6 +225,7 @@ router.post('/new-shift', async (req, res) => {
             lateAfterMinutes: lateAfterMinutes ?? 5,
             absentAfterMinutes: absentAfterMinutes ?? 60,
             allowOT: allowOT ?? true,
+            weekends: weekends || [], // NEW WEEKEND FIELD
             createdBy: userEmail,
             createdAt: new Date(),
         };
@@ -234,6 +247,9 @@ router.post('/new-shift', async (req, res) => {
     }
 });
 
+// =======================================================
+// GET SHIFTS
+// =======================================================
 router.get('/get-shifts', async (req, res) => {
     try {
         const userEmail = req.query.userEmail;
@@ -292,5 +308,4 @@ router.get('/get-shifts', async (req, res) => {
     }
 });
 
-const shiftRoute = router;
-module.exports = { shiftRoute };
+module.exports = { shiftRoute: router };
