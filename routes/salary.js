@@ -1,4 +1,4 @@
-// salaryRoute.aggregate.js
+// salaryRoute.js
 require('dotenv').config();
 const express = require('express');
 const moment = require('moment-timezone');
@@ -12,151 +12,181 @@ const attendanceCollections = db.collection('attendanceList');
 const employeeCollections = db.collection('employeeList');
 const shiftingCollections = db.collection('shiftingList');
 const workingShiftCollections = db.collection('workingShiftList');
-const leaveCollections = db.collection('appliedLeaveList'); // your uploaded: /mnt/data/hrManagement.appliedLeaveList.json
+const leaveCollections = db.collection('appliedLeaveList');
 
 const MONTHS = [
-    'january','february','march','april','may','june',
-    'july','august','september','october','november','december'
+    'january',
+    'february',
+    'march',
+    'april',
+    'may',
+    'june',
+    'july',
+    'august',
+    'september',
+    'october',
+    'november',
+    'december',
 ];
 
-// helper to count weekend occurrences in a month (JS)
-function countWeekendDaysJS(year, monthIndex, weekendNames = []) {
-    if (!Array.isArray(weekendNames) || weekendNames.length === 0) return 0;
-    // js Date.getDay(): 0=Sunday ... 6=Saturday
-    const wk = weekendNames
-        .map(w => (String(w || '').trim().toLowerCase()))
-        .filter(Boolean);
-
-    const nameToNum = {
-        sunday: 0, monday: 1, tuesday: 2, wednesday: 3,
-        thursday: 4, friday: 5, saturday: 6
-    };
-
-    const weekendNums = wk.map(n => nameToNum[n]).filter(n => typeof n === 'number');
-
-    let count = 0;
-    const totalDays = new Date(year, monthIndex + 1, 0).getDate();
-    for (let d = 1; d <= totalDays; d++) {
-        const dt = new Date(year, monthIndex, d);
-        if (weekendNums.includes(dt.getDay())) count++;
-    }
-    return count;
-}
-
-// parse a granted date string robustly into a moment in Asia/Dhaka
-function parseGrantedDateToMoment(str) {
-    if (!str) return null;
-    // try common formats used in your data: "21-Nov-2025", "2025-11-21", etc.
-    const fmts = ['DD-MMM-YYYY', 'D-MMM-YYYY', 'YYYY-MM-DD', 'DD-MM-YYYY', 'D-M-YYYY'];
-    for (const f of fmts) {
-        const m = moment.tz(str, f, 'Asia/Dhaka');
+// JS helper: convert many date string formats to a moment (Asia/Dhaka), day-start
+function parseToMoment(dateStr) {
+    if (!dateStr) return null;
+    const formats = [
+        'DD-MMM-YYYY',
+        'D-MMM-YYYY',
+        'YYYY-MM-DD',
+        'DD-MM-YYYY',
+        'D-M-YYYY',
+    ];
+    for (const f of formats) {
+        const m = moment.tz(dateStr, f, 'Asia/Dhaka');
         if (m.isValid()) return m.startOf('day');
     }
-    // fallback safe parse
-    const m2 = moment.tz(str, 'Asia/Dhaka');
+    // fallback to generic parser
+    const m2 = moment.tz(dateStr, 'Asia/Dhaka');
     return m2.isValid() ? m2.startOf('day') : null;
+}
+
+// JS helper: count occurrences of given weekday names in a month
+function countWeekendDays(year, monthIndex, weekendNames = []) {
+    if (!Array.isArray(weekendNames) || weekendNames.length === 0) return 0;
+    const nameMap = {
+        sunday: 0,
+        monday: 1,
+        tuesday: 2,
+        wednesday: 3,
+        thursday: 4,
+        friday: 5,
+        saturday: 6,
+    };
+    const nums = weekendNames
+        .map((s) =>
+            String(s || '')
+                .trim()
+                .toLowerCase()
+        )
+        .map((s) => nameMap[s])
+        .filter((n) => typeof n === 'number');
+    if (!nums.length) return 0;
+    const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    let cnt = 0;
+    for (let d = 1; d <= daysInMonth; d++) {
+        const dt = new Date(year, monthIndex, d);
+        if (nums.includes(dt.getDay())) cnt++;
+    }
+    return cnt;
 }
 
 salaryRoute.get('/get-salary-sheet', async (req, res) => {
     try {
         let { search = '', month = '', page = 1, limit = 20 } = req.query;
+        if (!month)
+            return res.status(400).json({
+                message: 'month query required (e.g. ?month=October)',
+            });
 
-        if (!month) return res.status(400).json({ message: 'month query is required (e.g. ?month=October)' });
-
-        search = String(search || '').trim().toLowerCase();
-        month = String(month || '').trim().toLowerCase();
+        search = String(search || '')
+            .trim()
+            .toLowerCase();
+        month = String(month || '')
+            .trim()
+            .toLowerCase();
 
         const monthIndex = MONTHS.indexOf(month);
-        if (monthIndex === -1) return res.status(400).json({ message: 'Invalid month name' });
+        if (monthIndex === -1)
+            return res.status(400).json({ message: 'Invalid month name' });
 
         const year = new Date().getFullYear();
-        const totalDaysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+        const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
 
         page = Math.max(1, Number(page) || 1);
         limit = Math.max(1, Number(limit) || 20);
         const skip = (page - 1) * limit;
 
-        // ignored emails (env) - comma separated
         const ignoredEmails = (process.env.IGNORED_ATTENDANCE_EMAILS || '')
             .split(',')
-            .map(e => e.trim().toLowerCase())
+            .map((e) => e.trim().toLowerCase())
             .filter(Boolean);
 
-        // month string for prefix match on attendance.date (attendance date format is "YYYY-MM-DD")
-        const monthStr = `${year}-${String(monthIndex + 1).padStart(2, '0')}`; // e.g. "2025-11"
-
-        // Build match for PF base
+        // Build PF match
         const pfMatch = {};
-        if (search) {
-            pfMatch.email = { $regex: search, $options: 'i' };
-        }
+        if (search) pfMatch.email = { $regex: search, $options: 'i' };
 
-        // Aggregation: get PF documents + joined employee + shifting assignment + working shift lookup +
-        // attendance dates for the month + approved leave docs
+        // Build month patterns for attendance lookup:
+        // 1) ISO-style "YYYY-MM" prefix (e.g. "2025-10-")
+        // 2) Short-month style "-Oct-YYYY" (e.g. "15-Oct-2025")
+        const isoPrefix = `${year}-${String(monthIndex + 1).padStart(2, '0')}`; // e.g. "2025-10"
+        // short month like "Oct"
+        const monthShort = moment.monthsShort()[monthIndex]; // e.g. "Oct"
+        const shortMonthRegex = `-${monthShort}-${year}`; // e.g. "-Oct-2025"
+
+        // Aggregation pipeline: join PF -> employee -> shifting -> workingShift -> attendance month -> approved leaves
         const pipeline = [
             { $match: pfMatch },
 
-            // join employee doc
+            // join employee
             {
                 $lookup: {
                     from: 'employeeList',
                     localField: 'email',
                     foreignField: 'email',
-                    as: 'emp'
-                }
+                    as: 'emp',
+                },
             },
             { $unwind: '$emp' },
-
-            // exclude deactivated employees
             { $match: { 'emp.status': { $ne: 'De-activate' } } },
 
-            // join shiftingList (assigned shift info)
+            // join shiftingList (employee assigned shift)
             {
                 $lookup: {
                     from: 'shiftingList',
                     let: { email: '$email' },
                     pipeline: [
                         { $match: { $expr: { $eq: ['$email', '$$email'] } } },
-                        { $limit: 1 }
+                        { $limit: 1 },
                     ],
-                    as: 'shiftAssign'
-                }
+                    as: 'shiftAssign',
+                },
             },
             {
                 $addFields: {
-                    shiftAssign: { $arrayElemAt: ['$shiftAssign', 0] }
-                }
+                    shiftAssign: { $arrayElemAt: ['$shiftAssign', 0] },
+                },
             },
 
-            // lookup workingShiftList (possible fallback to holidays/weekends per shiftName+branch)
+            // join workingShiftList as fallback (by shiftName+branch)
             {
                 $lookup: {
                     from: 'workingShiftList',
-                    let: { shiftName: '$shiftAssign.shiftName', branch: '$shiftAssign.branch' },
+                    let: {
+                        shiftName: '$shiftAssign.shiftName',
+                        branch: '$shiftAssign.branch',
+                    },
                     pipeline: [
                         {
                             $match: {
                                 $expr: {
                                     $and: [
-                                        { $ne: ['$$shiftName', null] },
+                                        { $ifNull: ['$$shiftName', false] },
                                         { $eq: ['$shiftName', '$$shiftName'] },
-                                        { $eq: ['$branch', '$$branch'] }
-                                    ]
-                                }
-                            }
+                                        { $eq: ['$branch', '$$branch'] },
+                                    ],
+                                },
+                            },
                         },
-                        { $limit: 1 }
+                        { $limit: 1 },
                     ],
-                    as: 'workingShift'
-                }
+                    as: 'workingShift',
+                },
             },
             {
                 $addFields: {
-                    workingShift: { $arrayElemAt: ['$workingShift', 0] }
-                }
+                    workingShift: { $arrayElemAt: ['$workingShift', 0] },
+                },
             },
 
-            // Attendance lookup: get distinct dates (for safety use $addToSet) filtered by month prefix
+            // attendance lookup for the target month (match either isoPrefix or -Mon-YYYY)
             {
                 $lookup: {
                     from: 'attendanceList',
@@ -167,36 +197,53 @@ salaryRoute.get('/get-salary-sheet', async (req, res) => {
                                 $expr: {
                                     $and: [
                                         { $eq: ['$email', '$$email'] },
-                                        // date field assumed "YYYY-MM-DD" or ISO starting with YYYY-MM
-                                        { $regexMatch: { input: '$date', regex: `^${monthStr}` } }
-                                    ]
-                                }
-                            }
+                                        {
+                                            $or: [
+                                                {
+                                                    $regexMatch: {
+                                                        input: '$date',
+                                                        regex: `^${isoPrefix}`,
+                                                    },
+                                                },
+                                                {
+                                                    $regexMatch: {
+                                                        input: '$date',
+                                                        regex: `${shortMonthRegex}`,
+                                                    },
+                                                },
+                                            ],
+                                        },
+                                    ],
+                                },
+                            },
                         },
+                        // group dedupe days
                         {
                             $group: {
                                 _id: null,
-                                attendanceDates: { $addToSet: '$date' }
-                            }
+                                dates: { $addToSet: '$date' },
+                            },
                         },
                         {
                             $project: {
                                 _id: 0,
-                                attendanceDates: 1,
-                                attendanceCount: { $size: { $ifNull: ['$attendanceDates', []] } }
-                            }
-                        }
+                                dates: 1,
+                                attendanceCount: {
+                                    $size: { $ifNull: ['$dates', []] },
+                                },
+                            },
+                        },
                     ],
-                    as: 'attendanceMonth'
-                }
+                    as: 'attendanceMonth',
+                },
             },
             {
                 $addFields: {
-                    attendanceMonth: { $arrayElemAt: ['$attendanceMonth', 0] }
-                }
+                    attendanceMonth: { $arrayElemAt: ['$attendanceMonth', 0] },
+                },
             },
 
-            // Leave lookup: fetch approved leaves for this employee that overlap the month (we will compute counts in JS)
+            // approved leave lookup for user (we fetch approved leaves; counting done in JS)
             {
                 $lookup: {
                     from: 'appliedLeaveList',
@@ -207,103 +254,125 @@ salaryRoute.get('/get-salary-sheet', async (req, res) => {
                                 $expr: {
                                     $and: [
                                         { $eq: ['$email', '$$email'] },
-                                        { $eq: ['$status', 'Approved'] }
-                                    ]
-                                }
-                            }
+                                        { $eq: ['$status', 'Approved'] },
+                                    ],
+                                },
+                            },
                         },
                         {
                             $project: {
-                                _id: 1,
                                 startDate: 1,
                                 endDate: 1,
-                                grantedDates: 1
-                            }
-                        }
+                                grantedDates: 1,
+                            },
+                        },
                     ],
-                    as: 'approvedLeaves'
-                }
+                    as: 'approvedLeaves',
+                },
             },
 
-            // Final projection of required fields
+            // project only required fields
             {
                 $project: {
                     email: 1,
                     salary: 1,
-                    'emp.fullName': 1,
-                    'emp.accountNumber': 1,
+                    emp: {
+                        fullName: '$emp.fullName',
+                        accountNumber: '$emp.accountNumber',
+                    },
                     shiftAssign: 1,
                     workingShift: 1,
                     attendanceMonth: 1,
-                    approvedLeaves: 1
-                }
+                    approvedLeaves: 1,
+                },
             },
 
-            // pagination at aggregation level
+            // pagination
             { $skip: skip },
-            { $limit: limit }
+            { $limit: limit },
         ];
 
-        const aggResult = await PFAndSalaryCollections.aggregate(pipeline).toArray();
+        const agg = await PFAndSalaryCollections.aggregate(pipeline).toArray();
 
-        // Prepare response rows by computing grantedLeaveCount and weekendCount in JS (fast)
-        const rows = [];
-
-        // month start/end moments
-        const monthStart = moment.tz(`${year}-${String(monthIndex + 1).padStart(2,'0')}-01`, 'YYYY-MM-DD', 'Asia/Dhaka').startOf('day');
+        // Prepare month boundaries
+        const monthStart = moment
+            .tz(
+                `${year}-${String(monthIndex + 1).padStart(2, '0')}-01`,
+                'YYYY-MM-DD',
+                'Asia/Dhaka'
+            )
+            .startOf('day');
         const monthEnd = monthStart.clone().endOf('month');
 
-        for (const doc of aggResult) {
-            const email = String(doc.email || '').toLowerCase();
-            const emp = doc.emp || {};
-            const salary = Number(doc.salary || 0);
+        const rows = [];
 
-            // if ignored -> full salary
-            if (ignoredEmails.includes(email)) {
-                const perDaySalary = Number((salary / totalDaysInMonth).toFixed(2));
+        for (const d of agg) {
+            const email = String(d.email || '').toLowerCase();
+            const emp = d.emp || {};
+            const salary = Number(d.salary || 0);
+
+            // ignored full-salary
+            const ignored = (process.env.IGNORED_ATTENDANCE_EMAILS || '')
+                .split(',')
+                .map((e) => e.trim().toLowerCase())
+                .filter(Boolean)
+                .includes(email);
+            if (ignored) {
+                const perDay = Number((salary / daysInMonth).toFixed(2));
                 rows.push({
                     email,
                     name: emp.fullName || '',
                     accountNumber: emp.accountNumber || '',
                     salary,
-                    perDaySalary,
-                    present: totalDaysInMonth,
+                    perDaySalary: perDay,
+                    present: 0,
                     absent: 0,
-                    total: salary
+                    total: salary,
                 });
                 continue;
             }
 
-            // attendance count from aggregation (safe)
-            const attendanceCount = (doc.attendanceMonth && doc.attendanceMonth.attendanceCount) ? doc.attendanceMonth.attendanceCount : 0;
+            const attendanceCount =
+                d.attendanceMonth && d.attendanceMonth.attendanceCount
+                    ? d.attendanceMonth.attendanceCount
+                    : 0;
 
-            // determine weekends: try shiftAssign.weekends first, else workingShift.weekends else []
+            // determine weekends: shiftAssign.weekends > workingShift.weekends > default ['Sunday']
             let weekends = [];
-            if (doc.shiftAssign && Array.isArray(doc.shiftAssign.weekends) && doc.shiftAssign.weekends.length) {
-                weekends = doc.shiftAssign.weekends;
-            } else if (doc.workingShift && Array.isArray(doc.workingShift.weekends) && doc.workingShift.weekends.length) {
-                weekends = doc.workingShift.weekends;
+            if (
+                d.shiftAssign &&
+                Array.isArray(d.shiftAssign.weekends) &&
+                d.shiftAssign.weekends.length
+            ) {
+                weekends = d.shiftAssign.weekends;
+            } else if (
+                d.workingShift &&
+                Array.isArray(d.workingShift.weekends) &&
+                d.workingShift.weekends.length
+            ) {
+                weekends = d.workingShift.weekends;
             } else {
-                weekends = []; // default: none
+                weekends = ['Sunday']; // default as requested
             }
 
-            // compute weekend count in month using JS helper
-            const weekendCount = countWeekendDaysJS(year, monthIndex, weekends);
+            const weekendCount = countWeekendDays(year, monthIndex, weekends);
 
-            // compute grantedLeaveCount by iterating approvedLeaves
+            // compute granted leave count inside month (robust parsing)
             let grantedLeaveCount = 0;
-            for (const leave of (doc.approvedLeaves || [])) {
-                // prefer grantedDates array if present
-                if (Array.isArray(leave.grantedDates) && leave.grantedDates.length) {
-                    for (const ds of leave.grantedDates) {
-                        const m = parseGrantedDateToMoment(ds);
+            for (const leave of d.approvedLeaves || []) {
+                if (
+                    Array.isArray(leave.grantedDates) &&
+                    leave.grantedDates.length
+                ) {
+                    for (const dstr of leave.grantedDates) {
+                        const m = parseToMoment(dstr);
                         if (!m) continue;
-                        if (m.isBetween(monthStart, monthEnd, 'day', '[]')) grantedLeaveCount++;
+                        if (m.isBetween(monthStart, monthEnd, 'day', '[]'))
+                            grantedLeaveCount++;
                     }
                 } else {
-                    // fallback: startDate / endDate - try multiple parse formats
-                    const sd = parseGrantedDateToMoment(leave.startDate);
-                    const ed = parseGrantedDateToMoment(leave.endDate);
+                    const sd = parseToMoment(leave.startDate);
+                    const ed = parseToMoment(leave.endDate);
                     if (!sd || !ed) continue;
                     const from = moment.max(sd, monthStart);
                     const to = moment.min(ed, monthEnd);
@@ -313,14 +382,13 @@ salaryRoute.get('/get-salary-sheet', async (req, res) => {
                 }
             }
 
-            // Final present / absent
             let present = attendanceCount + weekendCount + grantedLeaveCount;
-            if (present > totalDaysInMonth) present = totalDaysInMonth;
-            let absent = totalDaysInMonth - present;
+            if (present > daysInMonth) present = daysInMonth;
+            let absent = daysInMonth - present;
             if (absent < 0) absent = 0;
 
-            const perDaySalary = Number((salary / totalDaysInMonth).toFixed(2));
-            const total = Number((perDaySalary * present).toFixed(2));
+            const perDaySalary = Number((salary / daysInMonth).toFixed(2));
+            const total = Math.ceil(present * perDaySalary);
 
             rows.push({
                 email,
@@ -331,28 +399,33 @@ salaryRoute.get('/get-salary-sheet', async (req, res) => {
                 present,
                 absent,
                 total,
-                // debug fields (optional) - remove in production
                 _debug: {
                     attendanceCount,
                     weekendCount,
                     grantedLeaveCount,
-                    weekends
-                }
+                    weekends,
+                }, // optional debug
             });
         }
 
-        // Count totalEmployees for pagination (using same pfMatch but counting joined employees non-deactivated is heavier;
-        // we will compute with an aggregation count to match earlier behavior)
+        // compute totalEmployees for pagination (matching PFs with active employees)
         const countPipeline = [
             { $match: pfMatch },
             {
-                $lookup: { from: 'employeeList', localField: 'email', foreignField: 'email', as: 'emp' }
+                $lookup: {
+                    from: 'employeeList',
+                    localField: 'email',
+                    foreignField: 'email',
+                    as: 'emp',
+                },
             },
             { $unwind: '$emp' },
             { $match: { 'emp.status': { $ne: 'De-activate' } } },
-            { $count: 'total' }
+            { $count: 'total' },
         ];
-        const countAgg = await PFAndSalaryCollections.aggregate(countPipeline).toArray();
+        const countAgg = await PFAndSalaryCollections.aggregate(
+            countPipeline
+        ).toArray();
         const totalEmployees = countAgg[0]?.total || 0;
 
         return res.json({
@@ -360,11 +433,13 @@ salaryRoute.get('/get-salary-sheet', async (req, res) => {
             limit,
             totalEmployees,
             totalPages: Math.ceil(totalEmployees / limit),
-            data: rows
+            data: rows,
         });
     } catch (err) {
-        console.error('Salary sheet aggregate error:', err);
-        return res.status(500).json({ message: 'Internal Server Error', error: err.message });
+        console.error('salary sheet error', err);
+        return res
+            .status(500)
+            .json({ message: 'Internal Server Error', error: err.message });
     }
 });
 
