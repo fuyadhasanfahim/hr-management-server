@@ -3873,7 +3873,7 @@ async function run() {
 
                 // ✅ Sort directly by REAL Date (FAST)
                 pipeline.push(
-                    { $sort: { date: -1, _id: -1 } },
+                    { $sort: { date: 1, _id: -1 } },
                     {
                         $facet: {
                             items: [
