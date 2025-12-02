@@ -693,25 +693,72 @@ async function run() {
         app.post('/createLocalOrder', async (req, res) => {
             try {
                 const orderData = req.body;
-                const id = req.body.clientID;
+                const clientID = String(orderData.clientID || '').trim();
+                const orderName = String(orderData.orderName || '').trim();
 
-                if (id) {
+                // ✅ REQUIRED field validation
+                if (!clientID || !orderName) {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'clientID and orderName are required',
+                    });
+                }
+
+                // ✅ SAFE Date conversion
+                const date = new Date(orderData.date || Date.now());
+                const orderDeadLine = new Date(orderData.orderDeadLine);
+
+                if (isNaN(date.getTime()) || isNaN(orderDeadLine.getTime())) {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'Invalid date or deadline format',
+                    });
+                }
+
+                const cleanOrder = {
+                    ...orderData,
+                    clientID,
+                    orderName,
+                    date,
+                    orderDeadLine,
+                    isLocked: orderData.isLocked ?? false,
+                };
+
+                // ✅ LOGICAL duplicate check
+                const exists = await localOrderCollections.findOne({
+                    orderName,
+                    clientID,
+                });
+
+                if (exists) {
+                    return res.status(409).json({
+                        success: false,
+                        message:
+                            'Duplicate order detected with same order name',
+                    });
+                }
+
+                // ✅ Push into client history
+                if (clientID) {
                     await clientCollections.updateOne(
-                        { clientID: id },
-                        { $push: { orderHistory: orderData } }
+                        { clientID },
+                        { $push: { orderHistory: cleanOrder } }
                     );
                 }
 
-                // 👉 ensure isLocked is present and false by default
-                const addOrder = await localOrderCollections.insertOne({
-                    ...orderData,
-                    isLocked: orderData.isLocked ?? false,
-                });
+                // ✅ Insert into main orders collection
+                const addOrder = await localOrderCollections.insertOne(
+                    cleanOrder
+                );
 
-                res.send(addOrder);
+                res.status(201).json({
+                    success: true,
+                    insertedId: addOrder.insertedId,
+                });
             } catch (error) {
                 res.status(500).json({
-                    message: 'Failed to add expense',
+                    success: false,
+                    message: 'Failed to add order',
                     error: error.message,
                 });
             }
@@ -3777,32 +3824,22 @@ async function run() {
                         : Math.min(Math.max(parseInt(size, 10) || 10, 1), 100);
 
                 const match = {};
+
+                // ✅ Client filter
                 if (clientId) match.clientID = String(clientId).trim();
 
-                // Optional month filter
-                if (month) {
+                // ✅ Month filter using REAL Date
+                if (month && month.toLowerCase() !== 'all') {
                     const wanted = String(month).trim().toLowerCase();
+
                     match.$expr = {
                         $eq: [
                             {
                                 $toLower: {
-                                    $ifNull: [
-                                        '$month',
-                                        {
-                                            $dateToString: {
-                                                date: {
-                                                    $ifNull: [
-                                                        {
-                                                            $toDate:
-                                                                '$orderDate',
-                                                        },
-                                                        { $toDate: '$date' },
-                                                    ],
-                                                },
-                                                format: '%B',
-                                            },
-                                        },
-                                    ],
+                                    $dateToString: {
+                                        date: '$date', // ✅ REAL Date field
+                                        format: '%B',
+                                    },
                                 },
                             },
                             wanted,
@@ -3834,37 +3871,14 @@ async function run() {
                     });
                 }
 
-                // 🔥 Convert date BEFORE sort
+                // ✅ Sort directly by REAL Date (FAST)
                 pipeline.push(
-                    {
-                        $addFields: {
-                            parsedDate: {
-                                $dateFromString: {
-                                    dateString: '$date',
-                                    format: '%d-%b-%Y %H:%M:%S',
-                                    onError: null,
-                                    onNull: null,
-                                },
-                            },
-                            parsedDeadline: {
-                                $dateFromString: {
-                                    dateString: '$orderDeadLine',
-                                    format: '%d-%b-%Y %H:%M:%S',
-                                    onError: null,
-                                    onNull: null,
-                                },
-                            },
-                        },
-                    },
-                    // 🔥 Sort by parsedDate (DESC)
-                    { $sort: { parsedDate: -1, _id: -1 } },
+                    { $sort: { date: -1, _id: -1 } },
                     {
                         $facet: {
                             items: [
                                 { $skip: (pageNum - 1) * pageSize },
                                 { $limit: pageSize },
-
-                                // Final cleaned fields
                                 {
                                     $project: {
                                         _id: 1,
@@ -3875,8 +3889,10 @@ async function run() {
                                         orderPrice: 1,
                                         needServices: 1,
                                         returnFormat: 1,
-                                        date: '$parsedDate',
-                                        orderDeadLine: '$parsedDeadline',
+                                        date: 1, // ✅ REAL Date
+                                        orderDeadLine: 1, // ✅ REAL Date
+                                        userName: 1,
+                                        isLocked: 1,
                                     },
                                 },
                             ],
@@ -3888,6 +3904,7 @@ async function run() {
                 const agg = await localOrderCollections
                     .aggregate(pipeline)
                     .toArray();
+
                 const items = agg?.[0]?.items || [];
                 const count = agg?.[0]?.meta?.[0]?.count || 0;
 
