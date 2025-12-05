@@ -203,4 +203,12 @@ employeeRoute.post('/complete-profile', async (req, res) => {
     }
 });
 
+employeeRoute.get('/get-employees', async (req, res) => {
+    try {
+        const { page, search, perPage } = req.query;
+    } catch (error) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 module.exports = { employeeRoute };
