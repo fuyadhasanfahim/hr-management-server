@@ -3828,23 +3828,24 @@ async function run() {
                 // ✅ Client filter
                 if (clientId) match.clientID = String(clientId).trim();
 
-                // ✅ Month filter using REAL Date
+                // ✅ Month filter - Parse date field to handle multiple formats
+                let monthFilterNum = null;
                 if (month && month.toLowerCase() !== 'all') {
-                    const wanted = String(month).trim().toLowerCase();
-
-                    match.$expr = {
-                        $eq: [
-                            {
-                                $toLower: {
-                                    $dateToString: {
-                                        date: '$date', // ✅ REAL Date field
-                                        format: '%B',
-                                    },
-                                },
-                            },
-                            wanted,
-                        ],
+                    const monthMap = {
+                        january: 1,
+                        february: 2,
+                        march: 3,
+                        april: 4,
+                        may: 5,
+                        june: 6,
+                        july: 7,
+                        august: 8,
+                        september: 9,
+                        october: 10,
+                        november: 11,
+                        december: 12,
                     };
+                    monthFilterNum = monthMap[month.toLowerCase()];
                 }
 
                 const searchText = String(search || '').trim();
@@ -3857,8 +3858,14 @@ async function run() {
 
                 const pipeline = [];
 
-                if (Object.keys(match).length) pipeline.push({ $match: match });
+                // ✅ Client filter first (uses index)
+                if (clientId) {
+                    pipeline.push({
+                        $match: { clientID: String(clientId).trim() },
+                    });
+                }
 
+                // ✅ Search filter
                 if (searchRegex) {
                     pipeline.push({
                         $match: {
@@ -3871,7 +3878,67 @@ async function run() {
                     });
                 }
 
-                // ✅ Sort directly by REAL Date (FAST)
+                // ✅ Parse date field to handle multiple formats (only if month filter is needed)
+                if (monthFilterNum) {
+                    pipeline.push({
+                        $addFields: {
+                            _parsedDate: {
+                                $ifNull: [
+                                    // Try ISO/Date type first
+                                    {
+                                        $convert: {
+                                            input: '$date',
+                                            to: 'date',
+                                            onError: null,
+                                            onNull: null,
+                                        },
+                                    },
+                                    {
+                                        $ifNull: [
+                                            // Try dd-MMM-yyyy (01-Dec-2024)
+                                            {
+                                                $dateFromString: {
+                                                    dateString: '$date',
+                                                    format: '%d-%b-%Y',
+                                                    onError: null,
+                                                    onNull: null,
+                                                },
+                                            },
+                                            // Try dd-mm-yyyy (01-12-2024)
+                                            {
+                                                $dateFromString: {
+                                                    dateString: '$date',
+                                                    format: '%d-%m-%Y',
+                                                    onError: null,
+                                                    onNull: null,
+                                                },
+                                            },
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
+                    });
+
+                    // ✅ Filter by month (timezone-aware for Asia/Dhaka)
+                    pipeline.push({
+                        $match: {
+                            $expr: {
+                                $eq: [
+                                    {
+                                        $month: {
+                                            date: '$_parsedDate',
+                                            timezone: 'Asia/Dhaka',
+                                        },
+                                    },
+                                    monthFilterNum,
+                                ],
+                            },
+                        },
+                    });
+                }
+
+                // ✅ Sort directly by date (FAST)
                 pipeline.push(
                     { $sort: { date: 1, _id: -1 } },
                     {
