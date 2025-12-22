@@ -203,4 +203,55 @@ employeeRoute.post('/complete-profile', async (req, res) => {
     }
 });
 
+employeeRoute.get('/get-employees', async (req, res) => {
+    try {
+        const page = Number(req.query.page) || 1;
+        const perPage = Number(req.query.perPage) || 20;
+        const search = req.query.search?.trim() || '';
+        const sortOrder = Number(req.query.sortOrder) || -1;
+
+        // ✅ SORT KEY WHITELIST (SECURITY FIX)
+        const allowedSortKeys = ['createdAt', 'fullName', 'status', 'branch'];
+        const sortKey = allowedSortKeys.includes(req.query.sortKey)
+            ? req.query.sortKey
+            : 'createdAt';
+
+        const skip = (page - 1) * perPage;
+
+        // ✅ ONLY APPLY SEARCH IF VALUE EXISTS
+        const query = search
+            ? {
+                  $or: [
+                      { fullName: { $regex: search, $options: 'i' } },
+                      { eid: { $regex: search, $options: 'i' } },
+                  ],
+              }
+            : {};
+
+        // ✅ FETCH DATA
+        const employees = await employeeCollections
+            .find(query)
+            .sort({ [sortKey]: sortOrder })
+            .skip(skip)
+            .limit(perPage)
+            .toArray();
+
+        // ✅ TOTAL COUNT
+        const total = await employeeCollections.countDocuments(query);
+
+        return res.status(200).json({
+            success: true,
+            data: employees,
+            total,
+            totalPages: Math.ceil(total / perPage),
+            currentPage: page,
+        });
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            message: err.message,
+        });
+    }
+});
+
 module.exports = { employeeRoute };
