@@ -168,6 +168,18 @@ async function run() {
         const salaryAndPFCollections = database.collection('salaryAndPFList');
         const workingShiftCollections = database.collection('workingShiftList');
 
+        // *******************************************************************************************
+        // GET /users - Return all users
+        app.get('/users', verifyToken, async (req, res) => {
+            try {
+                const users = await userCollections.find({}).toArray();
+                res.send(users);
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: 'Failed to fetch users' });
+            }
+        });
+
         // ******************store unpaid once********************************************************
 
         // *******************************************************************************************
@@ -3837,8 +3849,9 @@ async function run() {
                             {
                                 $toLower: {
                                     $dateToString: {
-                                        date: '$date', // ✅ REAL Date field
+                                        date: { $toDate: '$date' }, // ✅ SAFELY convert
                                         format: '%B',
+                                        timezone: 'Asia/Dhaka', // ✅ Fix: Account for timezone
                                     },
                                 },
                             },
